@@ -54,19 +54,62 @@ namespace StatifyUWPLib
             }
         }
 
-        public static async Task<ImageSource> GetImageByURL(string imageUrl)
+public static async Task<BitmapImage> GetImageByURL(string imageUrl, int maxWidth = 100, int maxHeight = 100)
         {
             using (HttpClient client = new HttpClient())
             {
                 byte[] imageBytes = await client.GetByteArrayAsync(new Uri(imageUrl));
 
-                InMemoryRandomAccessStream randomAccessStream = new InMemoryRandomAccessStream();
-                await randomAccessStream.WriteAsync(imageBytes.AsBuffer());
-                randomAccessStream.Seek(0);
+                using (InMemoryRandomAccessStream randomAccessStream = new InMemoryRandomAccessStream())
+                {
+                    // Set up scaling & capture bitmap
+                    await randomAccessStream.WriteAsync(imageBytes.AsBuffer());
+                    randomAccessStream.Seek(0);
 
-                BitmapImage bitmapImage = new BitmapImage();
-                await bitmapImage.SetSourceAsync(randomAccessStream);
-                return bitmapImage;
+                    BitmapImage bitmapImage = new BitmapImage();
+                    await bitmapImage.SetSourceAsync(randomAccessStream);
+
+                    double originalWidth = bitmapImage.PixelWidth;
+                    double originalHeight = bitmapImage.PixelHeight;
+
+                    double scaleX = maxWidth / originalWidth;
+                    double scaleY = maxHeight / originalHeight;
+                    double scale = Math.Min(scaleX, scaleY);
+                    int newWidth = (int)(originalWidth * scale);
+                    int newHeight = (int)(originalHeight * scale);
+
+                    // Obtain pixel data and convert it to buffer
+                    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(randomAccessStream);
+                    BitmapTransform transform = new BitmapTransform { ScaledWidth = (uint)newWidth, ScaledHeight = (uint)newHeight };
+                    PixelDataProvider pixelData = await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight, transform, ExifOrientationMode.RespectExifOrientation, ColorManagementMode.ColorManageToSRgb);
+                    WriteableBitmap resizedBitmap = new WriteableBitmap(newWidth, newHeight);
+                    
+                    // Set bitmap data
+                    using (Stream stream = resizedBitmap.PixelBuffer.AsStream())
+                    {
+                        IBuffer imageBuffer = pixelData.DetachPixelData().AsBuffer();
+                        await stream.WriteAsync(imageBuffer.ToArray(), 0, (int)imageBuffer.Capacity);
+                    }
+
+                    // Reencode into BitmapImage
+                    using (InMemoryRandomAccessStream resizedStream = new InMemoryRandomAccessStream())
+                    {
+                        BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, resizedStream);
+                        Stream pixelStream = resizedBitmap.PixelBuffer.AsStream();
+                        byte[] pixels = new byte[pixelStream.Length];
+                        await pixelStream.ReadAsync(pixels, 0, pixels.Length);
+
+                        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore, (uint)newWidth, (uint)newHeight, decoder.DpiX, decoder.DpiY, pixels);
+                        await encoder.FlushAsync();
+
+                        resizedStream.Seek(0);
+
+                        BitmapImage resizedImage = new BitmapImage();
+                        await resizedImage.SetSourceAsync(resizedStream);
+
+                        return resizedImage;
+                    }
+                }
             }
         }
     }
